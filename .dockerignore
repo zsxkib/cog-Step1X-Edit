@@ -32,3 +32,6 @@ __pycache__
 *.avi
 *.mkv
 *.flv
+.gitattributes
+.gradio/
+app.py
