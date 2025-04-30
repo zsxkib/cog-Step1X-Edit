@@ -3,35 +3,48 @@
 # Replicates the exact behaviour of app.py (28 steps, CFG 6.0, etc.)
 # without any Gradio / Spaces code.  Copy-and-paste ready.
 
-import os, time, random, math, itertools
+# Standard library imports
+import os
+import time
+import random
+import math
+import itertools
+import subprocess
 from pathlib import Path as LocalPath
 from typing import Optional, List
 
+# Third-party imports
 import numpy as np
 import torch
-from cog import BasePredictor, Input, Path                     # Cog helpers
 from einops import rearrange, repeat
 from huggingface_hub import snapshot_download
 from PIL import Image
 from safetensors.torch import load_file
 from torchvision.transforms import functional as F
-from tqdm import tqdm                                         # progress bars
+from tqdm import tqdm
 
-# ────────── CONSTANTS ────────────────────────────────────────────────
+# Cog imports
+from cog import BasePredictor, Input, Path
+
 MODEL_CACHE       = "model_cache"
-MODEL_REPO        = "stepfun-ai/Step1X-Edit"                  # DiT + VAE
-QWEN_MODEL_PATH   = "Qwen/Qwen2.5-VL-7B-Instruct"             # Qwen-VL encoder
+
+os.environ["HF_HOME"] = MODEL_CACHE
+os.environ["TORCH_HOME"] = MODEL_CACHE
+os.environ["HF_DATASETS_CACHE"] = MODEL_CACHE
+os.environ["TRANSFORMERS_CACHE"] = MODEL_CACHE
+os.environ["HUGGINGFACE_HUB_CACHE"] = MODEL_CACHE
+        
+MODEL_REPO        = "stepfun-ai/Step1X-Edit"
+QWEN_MODEL_PATH   = "Qwen/Qwen2.5-VL-7B-Instruct"
 CUDA_DEVICE       = "cuda" if torch.cuda.is_available() else "cpu"
 
 os.makedirs(MODEL_CACHE, exist_ok=True)
 
-# ────────── IMPORTS FROM ORIGINAL CODEBASE ───────────────────────────
 from modules.autoencoder   import AutoEncoder
 from modules.conditioner   import Qwen25VL_7b_Embedder as Qwen2VLEmbedder
 from modules.model_edit    import Step1XParams, Step1XEdit
-import sampling                                                # provided with repo
+import sampling
 
-# ─────────────────────────────────────────────────────────────────────
 def load_state_dict(model, ckpt_path: str, device="cuda", strict=False, assign=True):
     """Load .pt / .safetensors checkpoint into model and return it."""
     if ckpt_path.endswith(".safetensors"):
@@ -72,7 +85,6 @@ def build_models(dit_path: str, ae_path: str, qwen_path: str,
     return ae, dit, qwen_enc
 
 
-# ──────────  ImageGenerator  (from app.py, unmodified)  ──────────────
 class ImageGenerator:
     """End-to-end wrapper that mirrors the one in app.py."""
 
@@ -83,19 +95,16 @@ class ImageGenerator:
             dit_path, ae_path, qwen_path, device, max_length, dtype
         )
 
-    # Convenience for Predictor.setup()
     def to_cuda(self):
         self.ae.to("cuda", dtype=torch.float32)
         self.dit.to("cuda", dtype=torch.bfloat16)
         self.llm_encoder.to("cuda", dtype=torch.bfloat16)
 
-    # ---------------- helpers ported 1-to-1 from app.py --------------
     def prepare(self, prompt, img, ref_image, ref_image_raw):
         bs, _, h, w       = img.shape
         _, _, ref_h, ref_w = ref_image.shape
         assert (h, w) == (ref_h, ref_w)
 
-        # broadcast prompt list
         if bs == 1 and not isinstance(prompt, str):
             bs = len(prompt)
         elif bs >= 1 and isinstance(prompt, str):
@@ -103,7 +112,7 @@ class ImageGenerator:
 
         img      = rearrange(img,      "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
         ref_img  = rearrange(ref_image,"b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
-        if img.shape[0] == 1 and bs > 1:          # replicate for CFG pairs
+        if img.shape[0] == 1 and bs > 1:
             img      = repeat(img,     "1 ... -> bs ...", bs=bs)
             ref_img  = repeat(ref_img, "1 ... -> bs ...", bs=bs)
 
@@ -117,7 +126,6 @@ class ImageGenerator:
         ref_ids[...,2] += torch.arange(w//2)[None,:]
         ref_ids = repeat(ref_ids, "h w c -> b (h w) c", b=bs)
 
-        # LLM encoding
         if isinstance(prompt, str):
             prompt = [prompt]
         txt, mask = self.llm_encoder(prompt, ref_image_raw)
@@ -169,7 +177,6 @@ class ImageGenerator:
         return rearrange(x, "b (h w) (c ph pw) -> b c (h ph) (w pw)",
                          h=math.ceil(h/16), w=math.ceil(w/16), ph=2, pw=2)
 
-    # --------------------- image I/O helpers -------------------------
     @staticmethod
     def load_image(img):
         if isinstance(img, np.ndarray):
@@ -199,7 +206,6 @@ class ImageGenerator:
         w_new = math.ceil(w_new) // 16 * 16
         return img.resize((w_new,h_new)), img.size
 
-    # -------------------------- main API -----------------------------
     @torch.inference_mode()
     def generate_image(self, *, prompt: str, negative_prompt: str,
                        ref_images: Image.Image, num_steps: int, cfg_guidance: float,
@@ -218,10 +224,8 @@ class ImageGenerator:
         if seed < 0:
             seed = torch.seed()
         
-        # Create generator on the correct device
         g = torch.Generator(device=self.device).manual_seed(seed)
 
-        # optional init_image
         if init_image is not None:
             init_tensor = self.load_image(init_image).to(self.device)
             init_tensor = torch.nn.functional.interpolate(init_tensor, (height,width))
@@ -257,23 +261,49 @@ class ImageGenerator:
                 for img in x.float()]
 
 
-# ────────── Cog Predictor ────────────────────────────────────────────
+MODEL_CACHE = "model_cache"
+BASE_URL = "https://weights.replicate.delivery/default/step1x-edit/model_cache/"
+
+def download_weights(url: str, dest: str) -> None:
+    start = time.time()
+    print("[!] Initiating download from URL: ", url)
+    print("[~] Destination path: ", dest)
+    if ".tar" in dest:
+        dest = os.path.dirname(dest)
+    command = ["pget", "-vf" + ("x" if ".tar" in url else ""), url, dest]
+    try:
+        print(f"[~] Running command: {' '.join(command)}")
+        subprocess.check_call(command, close_fds=False)
+    except subprocess.CalledProcessError as e:
+        print(
+            f"[ERROR] Failed to download weights. Command '{' '.join(e.cmd)}' returned non-zero exit status {e.returncode}."
+        )
+        raise
+    print("[+] Download completed in: ", time.time() - start, "seconds")
+
+
 class Predictor(BasePredictor):
     """Re-implements the Gradio demo controls as Cog inputs."""
 
-    def setup(self):
+    def setup(self) -> None:
+        """Load the model into memory to make running multiple predictions efficient"""
         st = time.time()
 
-        # download checkpoints once
-        model_dir = snapshot_download(
-            repo_id=MODEL_REPO,
-            local_dir=os.path.join(MODEL_CACHE, MODEL_REPO.split("/")[-1]),
-            local_dir_use_symlinks=False,
-        )
+        model_files = [
+            "Step1X-Edit.tar",
+        ]
+
+        for model_file in model_files:
+            url = BASE_URL + model_file
+            filename = url.split("/")[-1]
+            dest_path = os.path.join(MODEL_CACHE, filename)
+            if not os.path.exists(dest_path.replace(".tar", "")):
+                download_weights(url, dest_path)
+        
+        model_dir = os.path.join(MODEL_CACHE, "Step1X-Edit")
         dit_ckpt = os.path.join(model_dir, "step1x-edit-i1258.safetensors")
         vae_ckpt = os.path.join(model_dir, "vae.safetensors")
 
-        # instantiate pipeline
         self.pipe = ImageGenerator(
             dit_path=dit_ckpt,
             ae_path=vae_ckpt,
@@ -286,28 +316,67 @@ class Predictor(BasePredictor):
 
         print(f"Predictor ready in {time.time()-st:.1f}s")
 
-    # ----------------------------- run --------------------------------
     def predict(
         self,
         image: Path = Input(description="Input image"),
-        prompt: str  = Input(description="编辑指令 prompt", default="Remove the person from the image."),
-        size_level: int = Input(description="Internal resolution",
-                                default=512, choices=[512,768,1024]),
-        random_seed: int = Input(description="Random seed (-1=random)", default=-1),
+        prompt: str = Input(description="Editing instruction prompt", default="Remove the person from the image."),
+        size_level: int = Input(
+            description="Internal resolution (larger values process slower but may capture finer details)",
+            default=512, choices=[512, 768, 1024]
+        ),
+        seed: Optional[int] = Input(
+            description="Random seed for reproducible results (leave blank for random)",
+            default=None,
+        ),
+        output_format: str = Input(
+            description="Output image format",
+            choices=["webp", "jpg", "png"],
+            default="webp",
+        ),
+        output_quality: int = Input(
+            description="Compression quality for JPEG / WebP (1-100)",
+            ge=1,
+            le=100,
+            default=80,
+        ),
     ) -> Path:
+        """
+        Edit the input image according to `prompt` and return the result
+        in the desired format/quality.
+        """
 
-        seed = random.randint(0, 2**32-1) if random_seed == -1 else random_seed
+        # ── seed handling ─────────────────────────────────────────────
+        if seed is None:
+            seed = random.randint(0, 2**32 - 1)
         print("Using seed:", seed)
 
+        # ── load and preprocess input image ───────────────────────────
         img_pil = Image.open(str(image)).convert("RGB")
 
+        # ── run the diffusion pipeline ────────────────────────────────
         result_pil = self.pipe.generate_image(
-            prompt=prompt, negative_prompt="",
-            ref_images=img_pil, num_steps=28, cfg_guidance=6.0,
-            seed=seed, size_level=size_level, show_progress=True
+            prompt=prompt,
+            negative_prompt="",
+            ref_images=img_pil,
+            num_steps=28,
+            cfg_guidance=6.0,
+            seed=seed,
+            size_level=size_level,
+            show_progress=True,
         )[0]
 
-        out_path = "/tmp/step1x_edit_output.png"
-        result_pil.save(out_path)
-        print("Saved to", out_path)
+        # ── save with requested format / quality ──────────────────────
+        ext = output_format.lower()
+        save_kwargs = {}
+
+        if ext in {"jpg", "webp"}:          # lossy formats
+            save_kwargs["quality"] = output_quality
+            save_kwargs["optimize"] = True
+            if ext == "jpg":                # Pillow expects 'JPEG'
+                ext = "jpeg"
+
+        out_path = f"/tmp/step1x_edit_output.{ext}"
+        result_pil.save(out_path, format=ext.upper(), **save_kwargs)
+        print(f"Saved to {out_path} ({output_format.upper()}, q={output_quality})")
+
         return Path(out_path)
