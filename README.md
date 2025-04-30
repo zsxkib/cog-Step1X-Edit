@@ -1,147 +1,74 @@
-# Cog Template Repository
+[![Run on Replicate](https://replicate.com/zsxkib/step1x-edit/badge)](https://replicate.com/zsxkib/step1x-edit)
 
-This is a template repository for creating [Cog](https://github.com/replicate/cog) models that efficiently handle model weights with proper caching. It includes tools to upload model weights to Google Cloud Storage and generate download code for your `predict.py` file.
+# Step1X-Edit: Run advanced image editing locally
 
-[![Cog](https://github.com/replicate/cog/raw/main/docs/header.png)](https://github.com/replicate/cog)
+This repository provides a Cog container for **Step1X-Edit**, an advanced image editing model developed by StepFun AI. It lets you edit images based on a reference image and a text instruction, using the approach from their research.
 
-## Getting Started
+**Model links:**
+*   Project page: [step1x-edit.github.io](https://step1x-edit.github.io/)
+*   Technical report (Arxiv): [arxiv.org/abs/2504.17761](https://arxiv.org/abs/2504.17761)
+*   Original model (Hugging Face): [stepfun-ai/Step1X-Edit](https://huggingface.co/stepfun-ai/Step1X-Edit)
+*   Online demo: [Step1X-Edit Space](https://huggingface.co/spaces/stepfun-ai/Step1X-Edit)
+*   This Cog packaging by: [zsxkib on GitHub](https://github.com/zsxkib) / [@zsakib\_ on Twitter](https://twitter.com/zsakib_)
 
-To use this template for your own model:
+## Prerequisites
 
-1. Clone this repository
-2. Modify `predict.py` with your model's implementation
-3. Update `cog.yaml` with your model's dependencies
-4. Use `cache_manager.py` to upload and manage model weights
+*   **Docker**: You'll need Docker to build and run the container. [Install Docker](https://docs.docker.com/get-docker/).
+*   **Cog**: You'll need Cog to build and run this model locally. [Install Cog](https://github.com/replicate/cog#install).
+*   **NVIDIA GPU**: You need an NVIDIA GPU with enough memory to run the model. Check the original model's documentation for specifics (it might need more than 40 GB).
 
-## Repository Structure
+## Run locally
 
-- `predict.py`: The main model implementation file 
-- `cache_manager.py`: Script for uploading model weights to GCS and generating download code
-- `cog.yaml`: Cog configuration file that defines your model's environment
+Cog makes it straightforward to run this model locally. It handles building the container and downloading the model weights automatically.
 
-## Managing Model Weights with cache_manager.py
+1.  **Clone this repository:**
+    ```bash
+    git clone https://github.com/zsxkib/cog-Step1X-Edit.git
+    cd cog-Step1X-Edit
+    ```
 
-A key feature of this template is the `cache_manager.py` script, which helps you:
+2.  **Run the model:**
+    The first time you run `cog predict`, it builds the container and downloads the weights (which can be several gigabytes), so it might take a few minutes. Runs after that will be much faster.
 
-1. Upload model weights to Google Cloud Storage (GCS)
-2. Generate code for downloading those weights in your `predict.py`
-3. Handle both individual files and directories efficiently
+    You can provide the input image as a local file path using `@` or as a public URL:
 
-### Prerequisites for Using cache_manager.py
+    ```bash
+    # Example using a local file path
+    cog predict \
+      -i image=@path/to/your_image.jpg \
+      -i prompt="make the sky look like a beautiful sunset"
+    ```
 
-- Google Cloud SDK installed and configured (`gcloud` command)
-- Permission to upload to the specified GCS bucket (default: `gs://replicate-weights/`)
-- `tar` command available in your PATH
+    ```bash
+    # Example using a URL
+    cog predict \
+      -i image=https://raw.githubusercontent.com/replicate/cog/main/docs/logo.png \
+      -i prompt="turn the background blue"
+    ```
 
-### Basic Usage
+    Cog saves the edited image and prints the path, like `/tmp/step1x_edit_output.webp`.
 
-```bash
-python cache_manager.py --model-name your-model-name --local-dirs model_cache
-```
+    **You can change settings too:**
+    ```bash
+    cog predict \
+      -i image=@path/to/another_image.png \
+      -i prompt="remove the car from the background" \
+      -i size_level=768 \
+      -i seed=12345 \
+      -i output_format="png"
+    ```
+    You can change settings by adding more `-i` arguments. Check `predict.py` to see all the options, like `size_level`, `seed`, `output_format`, and `output_quality`. The `negative_prompt` is empty and other settings like guidance and steps are fixed in this setup.
 
-This will:
-1. Find files and directories in the `model_cache` directory
-2. Create tar archives of each directory
-3. Upload both individual files and tar archives to GCS
-4. Generate code snippets for downloading the weights in your `predict.py`
+## How it works
 
-### Advanced Usage
-
-```bash
-python cache_manager.py \
-    --model-name your-model-name \
-    --local-dirs model_cache weights \
-    --gcs-base-path gs://replicate-weights/ \
-    --cdn-base-url https://weights.replicate.delivery/default/ \
-    --keep-tars
-```
-
-#### Parameters
-
-- `--model-name`: Required. The name of your model (used in paths)
-- `--local-dirs`: Required. One or more local directories to process
-- `--gcs-base-path`: Optional. Base Google Cloud Storage path
-- `--cdn-base-url`: Optional. Base CDN URL
-- `--keep-tars`: Optional. Keep the generated .tar files locally after upload
-
-## Workflow Example
-
-1. **Develop your model locally**:
-   ```bash
-   # Run your model once to download weights to model_cache
-   cog predict -i prompt="test"
-   ```
-
-2. **Upload model weights**:
-   ```bash
-   python cache_manager.py --model-name your-model-name --local-dirs model_cache
-   ```
-
-3. **Copy the generated code snippet** into your `predict.py`
-
-4. **Test that the model can download weights**:
-   ```bash
-   rm -rf model_cache
-   cog predict -i prompt="test"
-   ```
-
-## Example Implementation
-
-The template comes with a sample Stable Diffusion implementation in `predict.py` that demonstrates:
-
-- Setting up the model cache directory
-- Downloading weights from GCS with progress reporting
-- Setting environment variables for model caching
-- Random seed generation for reproducibility
-- Output format and quality options
-
-## Best Practices
-
-- **Environment Variables**: Set cache-related environment variables early
-  ```python
-  os.environ["HF_HOME"] = MODEL_CACHE
-  os.environ["TORCH_HOME"] = MODEL_CACHE
-  # etc.
-  ```
-
-- **Seed Management**: Provide a seed parameter and implement random seed generation
-  ```python
-  if seed is None:
-      seed = int.from_bytes(os.urandom(2), "big")
-  print(f"Using seed: {seed}")
-  ```
-
-- **Output Formats**: Support multiple output formats (webp, jpg, png) with quality controls
-  ```python
-  output_format: str = Input(
-      description="Format of the output image",
-      choices=["webp", "jpg", "png"],
-      default="webp"
-  )
-  output_quality: int = Input(
-      description="The image compression quality...",
-      ge=1, le=100, default=80
-  )
-  ```
-
-## Deploying to Replicate
-
-After setting up your model, you can push it to [Replicate](https://replicate.com):
-
-1. Create a new model on Replicate
-2. Push your model:
-   ```bash
-   cog push r8.im/username/model-name
-   ```
+Cog uses `cog.yaml` to define the environment and `predict.py` to set up and run the model. When you run it the first time, the `setup` function in `predict.py` downloads the main Step1X-Edit model weights using `pget` if they're not already cached. The Qwen model for understanding the prompt and image is downloaded using the Hugging Face Hub tools.
 
 ## License
 
-MIT
+The original Step1X-Edit model uses the Apache 2.0 license. The code in this repository for packaging the model with Cog uses the MIT license. Please respect the original model's usage restrictions and license terms.
 
 ---
 
-[![Replicate](https://replicate.com/account/model-name/badge)](https://replicate.com/account/model-name) 
+⭐ Star this repo on [GitHub](https://github.com/zsxkib/cog-Step1X-Edit)!
 
-⭐ Star the repo on [GitHub](https://github.com/username/repo-name)!
-
-👋 Follow me on [Twitter/X](https://twitter.com/username)
+👋 Follow me on [Twitter/X](https://x.com/zsakib_)
